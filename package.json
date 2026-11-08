@@ -9,7 +9,7 @@
     "server"
   ],
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=22.12.0 <27"
   },
   "scripts": {
     "media": "node scripts/build-media.mjs",
