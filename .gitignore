@@ -1,0 +1,28 @@
+# Dependências
+node_modules/
+
+# Builds
+client/dist/
+client/.ssr/
+server/dist/
+
+# Ambiente e segredos
+.env
+.env.*
+!.env.example
+
+# Dados locais do servidor (concessões de acesso, códigos)
+server/data/
+
+# Verificações da Taste Skill (screenshots, perfis do Chrome); os waivers ficam versionados
+.taste-skill/*
+!.taste-skill/waivers.json
+shots/
+
+# Sistema / editores
+.DS_Store
+Thumbs.db
+*.log
+.vscode/*
+!.vscode/extensions.json
+.idea/

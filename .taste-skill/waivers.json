@@ -1,0 +1,7 @@
+[
+  {
+    "check": "sparse",
+    "target": "#como-funciona",
+    "reason": "pinned-chapters moment: one screen of content is held on screen through two screens of native scroll, so the stage is always full; a static measurement reads the hold as empty space"
+  }
+]

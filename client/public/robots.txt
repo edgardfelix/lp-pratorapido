@@ -1,0 +1,21 @@
+User-agent: *
+Allow: /
+Disallow: /acesso
+Disallow: /api/
+
+# Bulk scrapers and AI training crawlers: the page copy and the product
+# screens are the client's material.
+User-agent: GPTBot
+Disallow: /
+
+User-agent: CCBot
+Disallow: /
+
+User-agent: Google-Extended
+Disallow: /
+
+User-agent: Bytespider
+Disallow: /
+
+User-agent: ClaudeBot
+Disallow: /

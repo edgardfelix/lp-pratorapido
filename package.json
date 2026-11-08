@@ -1,0 +1,33 @@
+{
+  "name": "lp-pratorapido",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Landing page de vendas do Prato Rápido (React + TypeScript + styled-components) com servidor Node.js de integração (Cakto, acesso por e-mail).",
+  "type": "module",
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "media": "node scripts/build-media.mjs",
+    "og": "node scripts/build-og.mjs",
+    "dev": "concurrently -k -n client,server -c auto \"npm run dev -w client\" \"npm run dev -w server\"",
+    "build": "npm run build -w client && npm run build -w server",
+    "start": "npm run start -w server",
+    "typecheck": "npm run typecheck -w client && npm run typecheck -w server",
+    "test": "npm run test -w server"
+  },
+  "devDependencies": {
+    "@ffmpeg-installer/ffmpeg": "1.1.0",
+    "concurrently": "10.0.7",
+    "png-to-ico": "3.0.2",
+    "potrace": "2.1.8",
+    "sharp": "0.35.5"
+  },
+  "optionalDependencies": {
+    "@ffmpeg-installer/win32-x64": "4.1.0"
+  }
+}
