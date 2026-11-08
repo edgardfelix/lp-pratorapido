@@ -6,6 +6,9 @@ client/dist/
 client/.ssr/
 server/dist/
 
+# Vercel CLI (link do projeto, variáveis baixadas, build local)
+.vercel/
+
 # Ambiente e segredos
 .env
 .env.*

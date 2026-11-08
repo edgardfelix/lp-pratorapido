@@ -11,7 +11,11 @@ import type { AccessStore } from '../store/store.js';
  * Verifies the delivery (HMAC signature with a 5-minute window, or the body
  * secret when signatures are not required), parses only what it needs, and
  * applies each order idempotently: a retried delivery never grants twice.
- * Answers 2xx quickly; a storage failure answers 500 so Cakto retries.
+ *
+ * Cakto waits 8 seconds and retries only on network errors and timeouts, not
+ * on a non-2xx answer. Transient storage errors are retried by the Redis
+ * client inside that window; a failure that still answers 500 is listed in
+ * the Cakto panel (Histórico de eventos) for a manual resend.
  */
 export function caktoWebhookRouter(env: Env, access: AccessService, store: AccessStore) {
   const router = Router();
@@ -66,7 +70,7 @@ export function caktoWebhookRouter(env: Env, access: AccessService, store: Acces
           continue;
         }
         const eventId = `${event}:${order.id}`;
-        if (store.hasEvent(eventId)) {
+        if (await store.hasEvent(eventId)) {
           results.push('duplicate');
           continue;
         }

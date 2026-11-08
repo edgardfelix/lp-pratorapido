@@ -50,19 +50,43 @@ const schema = z.object({
   SMTP_PASS: z.string().default(''),
   MAIL_FROM: z.string().default('Prato Rápido <nao-responda@localhost>'),
 
+  /* Upstash Redis (REST). Required on serverless hosts, where files do not persist. */
+  UPSTASH_REDIS_REST_URL: optionalUrl,
+  UPSTASH_REDIS_REST_TOKEN: z.string().trim().default(''),
+  /** Namespace of every key this server writes, so the database can be shared. */
+  REDIS_PREFIX: z
+    .string()
+    .regex(/^[\w:.-]{1,64}$/)
+    .default('pratorapido:lp:'),
+
   DATA_DIR: z.string().default('./data'),
   STATIC_DIR: z.string().default('../client/dist'),
 });
 
-export type Env = z.infer<typeof schema> & { isProduction: boolean };
+export type Env = z.infer<typeof schema> & { isProduction: boolean; serverless: boolean };
 
-export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
+/**
+ * Platform defaults, applied before validation. On Vercel: production mode,
+ * one proxy hop (Vercel sets X-Forwarded-For to the client address) and the
+ * project's production domain as the public origin. Explicit settings win.
+ */
+function withPlatformDefaults(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  if (!source.VERCEL) return source;
+  const defaults: Record<string, string> = { NODE_ENV: 'production', TRUST_PROXY: '1' };
+  if (source.VERCEL_PROJECT_PRODUCTION_URL) defaults.PUBLIC_ORIGIN = `https://${source.VERCEL_PROJECT_PRODUCTION_URL}`;
+  const merged = { ...source };
+  for (const [key, value] of Object.entries(defaults)) if (!merged[key]) merged[key] = value;
+  return merged;
+}
+
+export function loadEnv(rawSource: NodeJS.ProcessEnv = process.env): Env {
+  const source = withPlatformDefaults(rawSource);
   const parsed = schema.safeParse(source);
   if (!parsed.success) {
     const details = z.prettifyError(parsed.error);
     throw new Error(`Invalid environment:\n${details}`);
   }
-  const env = { ...parsed.data, isProduction: parsed.data.NODE_ENV === 'production' };
+  const env = { ...parsed.data, isProduction: parsed.data.NODE_ENV === 'production', serverless: Boolean(source.VERCEL) };
 
   if (env.isProduction) {
     const problems: string[] = [];
@@ -70,6 +94,10 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     if (env.ACCESS_TOKEN_SECRET.length < 32) problems.push('ACCESS_TOKEN_SECRET (at least 32 characters)');
     if (!env.PUBLIC_ORIGIN.startsWith('https://')) problems.push('PUBLIC_ORIGIN (must be https)');
     if (env.APP_URL && !env.APP_URL.startsWith('https://')) problems.push('APP_URL (must be https)');
+    if (env.UPSTASH_REDIS_REST_URL && !env.UPSTASH_REDIS_REST_URL.startsWith('https://')) problems.push('UPSTASH_REDIS_REST_URL (must be https)');
+    if (env.serverless && !(env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN)) {
+      problems.push('UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN (serverless hosts keep no files between requests)');
+    }
     if (problems.length > 0) throw new Error(`Missing or weak production settings: ${problems.join(', ')}`);
   } else if (env.ACCESS_TOKEN_SECRET.length < 32) {
     // Local development only: a fixed, obviously-not-secret key.

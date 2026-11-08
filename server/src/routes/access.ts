@@ -1,5 +1,5 @@
 import express, { Router, type RequestHandler } from 'express';
-import { rateLimit } from 'express-rate-limit';
+import { rateLimit, type Store } from 'express-rate-limit';
 import { z } from 'zod';
 import { AccessError, type AccessService } from '../services/access.js';
 
@@ -13,17 +13,21 @@ async function atLeast<T>(ms: number, work: Promise<T>): Promise<T> {
   return result;
 }
 
-const limiter = (limit: number, windowMinutes: number) =>
-  rateLimit({
+/** Per-IP limits. `sharedStore` (Redis) counts across serverless instances. */
+const limiterFactory = (sharedStore?: (name: string) => Store) => (name: string, limit: number, windowMinutes: number) => {
+  const store = sharedStore?.(name);
+  return rateLimit({
     windowMs: windowMinutes * 60 * 1000,
     limit,
     standardHeaders: 'draft-8',
     legacyHeaders: false,
     ipv6Subnet: 56,
+    ...(store ? { store, passOnStoreError: true } : {}),
     handler: (_req, res, _next, options) => {
       res.status(options.statusCode).json({ ok: false, error: { code: 'rate_limited' } });
     },
   });
+};
 
 const sendError = (res: express.Response, error: unknown): boolean => {
   if (!(error instanceof AccessError)) return false;
@@ -32,8 +36,9 @@ const sendError = (res: express.Response, error: unknown): boolean => {
   return true;
 };
 
-export function accessRouter(access: AccessService) {
+export function accessRouter(access: AccessService, sharedStore?: (name: string) => Store) {
   const router = Router();
+  const limiter = limiterFactory(sharedStore);
   const json = express.json({ limit: '4kb', strict: true, type: 'application/json' });
 
   const requestCode: RequestHandler = async (req, res, next) => {
@@ -80,9 +85,9 @@ export function accessRouter(access: AccessService) {
     }
   };
 
-  router.post('/request-code', limiter(6, 15), json, requestCode);
-  router.post('/verify', limiter(20, 15), json, verify);
-  router.get('/session', limiter(60, 15), session);
+  router.post('/request-code', limiter('request-code', 6, 15), json, requestCode);
+  router.post('/verify', limiter('verify', 20, 15), json, verify);
+  router.get('/session', limiter('session', 60, 15), session);
 
   return router;
 }

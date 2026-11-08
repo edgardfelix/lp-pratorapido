@@ -66,7 +66,7 @@ export class AccessService {
     }
     const key = this.keyFor(normalized);
     const now = new Date().toISOString();
-    const current = this.store.getGrant(key);
+    const current = await this.store.getGrant(key);
     const grant: AccessGrant = {
       status: 'active',
       orders: { ...current?.orders, [orderId]: { status: 'paid', productId, offerId, at: now } },
@@ -80,7 +80,7 @@ export class AccessService {
   async revoke({ orderId, email }: OrderFacts, status: Exclude<OrderStatus, 'paid'>): Promise<void> {
     const normalized = normalizeEmail(email);
     const key = this.keyFor(normalized);
-    const current = this.store.getGrant(key);
+    const current = await this.store.getGrant(key);
     if (!current) return;
     const now = new Date().toISOString();
     const previous = current.orders[orderId];
@@ -90,8 +90,8 @@ export class AccessService {
     logger.info('access.revoked', { orderId, reason: status, email: maskEmail(normalized), stillActive: stillPaid });
   }
 
-  hasActiveGrant(email: string): boolean {
-    return this.store.getGrant(this.keyFor(normalizeEmail(email)))?.status === 'active';
+  async hasActiveGrant(email: string): Promise<boolean> {
+    return (await this.store.getGrant(this.keyFor(normalizeEmail(email))))?.status === 'active';
   }
 
   /* ---------------- verification codes ---------------- */
@@ -103,7 +103,7 @@ export class AccessService {
 
     const key = this.keyFor(email);
     const now = Date.now();
-    const existing = this.store.getCode(key);
+    const existing = await this.store.getCode(key);
 
     // Too soon since the last code: answer as usual, send nothing new.
     if (existing && now - existing.issuedAt < RESEND_AFTER_S * 1000) {
@@ -117,12 +117,11 @@ export class AccessService {
       throw new AccessError('rate_limited', 429, retryAfter);
     }
 
-    const active = this.store.getGrant(key)?.status === 'active';
+    const active = (await this.store.getGrant(key))?.status === 'active';
     const code = numericCode(CODE_LENGTH);
     await this.store.setCode(key, {
       hash: hmacHex(this.codeKey, key, ':', code),
       expiresAt: now + CODE_TTL_MS,
-      attempts: 0,
       issuedAt: now,
       windowStart: sameWindow ? existing.windowStart : now,
       windowCount,
@@ -146,7 +145,7 @@ export class AccessService {
     if (!isValidEmail(email) || code.length !== CODE_LENGTH) throw new AccessError('invalid_code', 400);
 
     const key = this.keyFor(email);
-    const record = this.store.getCode(key);
+    const record = await this.store.getCode(key);
     if (!record) throw new AccessError('invalid_code', 400);
 
     if (Date.now() > record.expiresAt) {
@@ -154,24 +153,25 @@ export class AccessService {
       throw new AccessError('code_expired', 400);
     }
 
-    if (record.attempts >= MAX_ATTEMPTS) {
+    // Counted before the comparison and atomically: however many guesses
+    // arrive at once, only the first MAX_ATTEMPTS are ever compared.
+    const attempt = await this.store.countAttempt(key);
+    if (attempt > MAX_ATTEMPTS) {
       await this.store.deleteCode(key);
       throw new AccessError('too_many_attempts', 429);
     }
 
     const matches = safeEqual(record.hash, hmacHex(this.codeKey, key, ':', code));
     if (!matches || record.decoy) {
-      const attempts = record.attempts + 1;
-      if (attempts >= MAX_ATTEMPTS) {
+      if (attempt >= MAX_ATTEMPTS) {
         await this.store.deleteCode(key);
         throw new AccessError('too_many_attempts', 429);
       }
-      await this.store.setCode(key, { ...record, attempts });
       throw new AccessError('invalid_code', 400);
     }
 
     // A refund or chargeback may have landed after the code was sent.
-    if (this.store.getGrant(key)?.status !== 'active') {
+    if ((await this.store.getGrant(key))?.status !== 'active') {
       await this.store.deleteCode(key);
       throw new AccessError('invalid_code', 400);
     }
@@ -185,7 +185,7 @@ export class AccessService {
   /** The session behind a token, if the grant is still active. */
   async session(token: string): Promise<{ email: string; status: 'active' }> {
     const claims = await this.tokens.verify(token);
-    if (!claims || !this.hasActiveGrant(claims.email)) throw new AccessError('unauthorized', 401);
+    if (!claims || !(await this.hasActiveGrant(claims.email))) throw new AccessError('unauthorized', 401);
     return { email: claims.email, status: 'active' };
   }
 }

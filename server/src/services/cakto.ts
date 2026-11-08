@@ -30,7 +30,14 @@ export function verifyCaktoDelivery(params: {
     // Reject stale or future deliveries: a captured payload cannot be replayed later.
     if (Math.abs(now / 1000 - Number(timestamp)) > SIGNATURE_TOLERANCE_S) return { ok: false, reason: 'stale_timestamp' };
     const expected = `v1=${hmacHex(secret, `${timestamp}.`, rawBody)}`;
-    return safeEqual(signature.trim(), expected) ? { ok: true, method: 'signature' } : { ok: false, reason: 'bad_signature' };
+    // A future scheme is announced as "v1=…,v2=…" during the transition: check the v1 entries.
+    const candidates = signature
+      .split(',')
+      .map((part) => part.trim())
+      .filter((part) => part.startsWith('v1='));
+    return candidates.some((candidate) => safeEqual(candidate, expected))
+      ? { ok: true, method: 'signature' }
+      : { ok: false, reason: 'bad_signature' };
   }
 
   if (requireSignature) return { ok: false, reason: 'missing_signature' };

@@ -4,9 +4,12 @@ import { logger } from '../lib/logger.js';
 
 /**
  * Persistence for access grants, verification codes and processed webhook
- * events. Records are keyed by an HMAC of the e-mail, so the data file holds
- * no plain-text addresses. A JSON file with atomic writes is enough for one
- * instance; implement `AccessStore` on Postgres/Redis to scale out.
+ * events. Records are keyed by an HMAC of the e-mail, so storage holds no
+ * plain-text addresses.
+ *
+ *   FileStore   one JSON file with atomic writes, for a single long-running server
+ *   RedisStore  Upstash Redis (store/redis.ts), for serverless hosts such as
+ *               Vercel, where instances are short-lived and the disk is not kept
  */
 
 export type OrderStatus = 'paid' | 'refunded' | 'chargeback' | 'canceled';
@@ -29,7 +32,6 @@ export interface VerificationCode {
   /** HMAC of (email key, code). The code itself is never stored. */
   hash: string;
   expiresAt: number;
-  attempts: number;
   issuedAt: number;
   /** Codes issued in the current one-hour window, for the per-address cap. */
   windowStart: number;
@@ -38,30 +40,39 @@ export interface VerificationCode {
   decoy: boolean;
 }
 
-interface Snapshot {
-  version: 1;
-  grants: Record<string, AccessGrant>;
-  codes: Record<string, VerificationCode>;
-  events: Record<string, number>;
-}
-
 export interface AccessStore {
-  getGrant(key: string): AccessGrant | undefined;
+  getGrant(key: string): Promise<AccessGrant | undefined>;
   setGrant(key: string, grant: AccessGrant): Promise<void>;
-  getCode(key: string): VerificationCode | undefined;
+  getCode(key: string): Promise<VerificationCode | undefined>;
+  /** Stores a newly issued code and resets its attempt counter. */
   setCode(key: string, code: VerificationCode): Promise<void>;
+  /**
+   * Counts one verification attempt against the current code and returns the
+   * running total. Atomic: parallel guesses each get their own number, so a
+   * burst of requests cannot share one count and exceed the attempt limit.
+   */
+  countAttempt(key: string): Promise<number>;
+  /** Removes the code and its attempt counter. */
   deleteCode(key: string): Promise<void>;
   /** True when this webhook event was already applied (idempotency). */
-  hasEvent(id: string): boolean;
+  hasEvent(id: string): Promise<boolean>;
   /** Records an applied event id; false when it was already recorded. */
   markEvent(id: string): Promise<boolean>;
   flush(): Promise<void>;
 }
 
-const EVENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
-const CODE_RETENTION_MS = 2 * 60 * 60 * 1000;
+export const EVENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+export const CODE_RETENTION_MS = 2 * 60 * 60 * 1000;
 
-const empty = (): Snapshot => ({ version: 1, grants: {}, codes: {}, events: {} });
+interface Snapshot {
+  version: 1;
+  grants: Record<string, AccessGrant>;
+  codes: Record<string, VerificationCode>;
+  attempts: Record<string, number>;
+  events: Record<string, number>;
+}
+
+const empty = (): Snapshot => ({ version: 1, grants: {}, codes: {}, attempts: {}, events: {} });
 
 export class FileStore implements AccessStore {
   private data: Snapshot = empty();
@@ -92,7 +103,7 @@ export class FileStore implements AccessStore {
     return store;
   }
 
-  getGrant(key: string) {
+  async getGrant(key: string) {
     return this.data.grants[key];
   }
 
@@ -101,23 +112,33 @@ export class FileStore implements AccessStore {
     await this.persist();
   }
 
-  getCode(key: string) {
+  async getCode(key: string) {
     return this.data.codes[key];
   }
 
   async setCode(key: string, code: VerificationCode) {
     this.data.codes[key] = code;
+    delete this.data.attempts[key];
     await this.persist();
   }
 
+  async countAttempt(key: string) {
+    // Incremented before the first await: one process, one count per call.
+    const count = (this.data.attempts[key] ?? 0) + 1;
+    this.data.attempts[key] = count;
+    await this.persist();
+    return count;
+  }
+
   async deleteCode(key: string) {
-    if (this.data.codes[key]) {
+    if (this.data.codes[key] || this.data.attempts[key]) {
       delete this.data.codes[key];
+      delete this.data.attempts[key];
       await this.persist();
     }
   }
 
-  hasEvent(id: string) {
+  async hasEvent(id: string) {
     return Boolean(this.data.events[id]);
   }
 
@@ -132,6 +153,9 @@ export class FileStore implements AccessStore {
   prune(now = Date.now()) {
     for (const [key, code] of Object.entries(this.data.codes)) {
       if (now - code.issuedAt > CODE_RETENTION_MS) delete this.data.codes[key];
+    }
+    for (const key of Object.keys(this.data.attempts)) {
+      if (!this.data.codes[key]) delete this.data.attempts[key];
     }
     for (const [id, at] of Object.entries(this.data.events)) {
       if (now - at > EVENT_RETENTION_MS) delete this.data.events[id];

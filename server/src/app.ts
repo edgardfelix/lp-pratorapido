@@ -1,7 +1,7 @@
 import path from 'node:path';
 import compression from 'compression';
 import express from 'express';
-import { rateLimit } from 'express-rate-limit';
+import { rateLimit, type Store as RateLimitStore } from 'express-rate-limit';
 import type { Env } from './config/env.js';
 import { apiNotFound, errorHandler } from './middleware/errors.js';
 import { apiOriginGuard, isolateResources, securityHeaders } from './middleware/security.js';
@@ -17,11 +17,13 @@ export interface AppDeps {
   env: Env;
   store: AccessStore;
   mailer: Mailer;
-  /** Serve client/dist (off in tests). */
+  /** Shared rate-limit counters (Redis on serverless). Absent: in memory. */
+  rateLimitStore?: (name: string) => RateLimitStore;
+  /** Serve client/dist (off in tests and on Vercel, where the CDN serves it). */
   serveStatic?: boolean;
 }
 
-export function createApp({ env, store, mailer, serveStatic = true }: AppDeps) {
+export function createApp({ env, store, mailer, rateLimitStore, serveStatic = true }: AppDeps) {
   const tokens = new TokenService(env.ACCESS_TOKEN_SECRET, env.ACCESS_TOKEN_TTL_SECONDS);
   const access = new AccessService(store, mailer, tokens, env.ACCESS_TOKEN_SECRET, env.APP_URL ?? null);
 
@@ -46,7 +48,7 @@ export function createApp({ env, store, mailer, serveStatic = true }: AppDeps) {
     caktoWebhookRouter(env, access, store),
   );
 
-  app.use('/api/access', apiOriginGuard(env), accessRouter(access));
+  app.use('/api/access', apiOriginGuard(env), accessRouter(access, rateLimitStore));
   app.use('/api', apiNotFound);
 
   if (serveStatic) app.use(staticSite(path.resolve(process.cwd(), env.STATIC_DIR)));

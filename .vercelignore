@@ -1,0 +1,23 @@
+# What `vercel deploy` leaves out of the upload: the build needs only the
+# sources, the lockfile and client/public. Git deploys clone the repository.
+
+# Original client files (the optimized media is already in client/public/media)
+/assets
+
+# Local build output, data and tooling
+node_modules
+/client/dist
+/client/.ssr
+/server/dist
+/data
+/server/data
+/shots
+/.taste-skill
+/.agents
+/skills-lock.json
+*.log
+
+# Secrets never leave the machine
+.env
+.env.*
+!.env.example

@@ -1,14 +1,47 @@
 import assert from 'node:assert/strict';
-import { createHmac } from 'node:crypto';
-import { describe, test } from 'node:test';
+import { createHmac, randomBytes } from 'node:crypto';
+import { after, describe, test } from 'node:test';
+import type { Options as RateLimitOptions } from 'express-rate-limit';
 import request from 'supertest';
 import { createApp } from '../src/app.js';
 import { loadEnv } from '../src/config/env.js';
 import { MemoryMailer } from '../src/services/mailer.js';
-import { FileStore } from '../src/store/store.js';
+import type { Storage } from '../src/store/open.js';
+import { createRedis, RedisRateLimitStore, RedisStore } from '../src/store/redis.js';
+import { FileStore, type VerificationCode } from '../src/store/store.js';
 
 const SECRET = 'test-webhook-secret-0123456789';
 const ORIGIN = 'http://localhost:5173';
+
+/*
+ * The suite runs on the in-memory file store. With TEST_UPSTASH_REDIS_REST_URL
+ * and TEST_UPSTASH_REDIS_REST_TOKEN set, it runs on Redis instead, under a
+ * throwaway prefix whose keys are all deleted at the end.
+ */
+const redisUrl = process.env.TEST_UPSTASH_REDIS_REST_URL;
+const redisToken = process.env.TEST_UPSTASH_REDIS_REST_TOKEN;
+const redis = redisUrl && redisToken ? createRedis(redisUrl, redisToken) : null;
+const runPrefix = `pratorapido:test:${randomBytes(6).toString('hex')}:`;
+let runs = 0;
+
+async function openTestStorage(): Promise<Storage> {
+  if (!redis) return { store: await FileStore.open(null) };
+  const prefix = `${runPrefix}${runs++}:`;
+  return {
+    store: new RedisStore(redis, prefix),
+    rateLimitStore: (name) => new RedisRateLimitStore(redis, `${prefix}rl:${name}:`),
+  };
+}
+
+after(async () => {
+  if (!redis) return;
+  let cursor = '0';
+  do {
+    const [next, keys] = await redis.scan(cursor, { match: `${runPrefix}*`, count: 500 });
+    if (keys.length > 0) await redis.del(...keys);
+    cursor = String(next);
+  } while (cursor !== '0');
+});
 
 async function setup() {
   const env = loadEnv({
@@ -19,9 +52,9 @@ async function setup() {
     PUBLIC_ORIGIN: ORIGIN,
     APP_URL: 'https://app.pratorapido.com.br',
   });
-  const store = await FileStore.open(null);
+  const { store, rateLimitStore } = await openTestStorage();
   const mailer = new MemoryMailer();
-  const { app } = createApp({ env, store, mailer, serveStatic: false });
+  const { app } = createApp({ env, store, mailer, rateLimitStore, serveStatic: false });
   return { app, store, mailer };
 }
 
@@ -96,6 +129,79 @@ describe('Cakto webhook', () => {
     assert.equal(res.status, 200);
     assert.deepEqual(res.body.results, ['ignored']);
   });
+
+  test('accepts the v1 signature when a newer scheme is listed next to it', async () => {
+    const { app } = await setup();
+    const body = delivery('purchase_approved');
+    const headers = signed(body);
+    const res = await request(app)
+      .post('/api/webhooks/cakto')
+      .set({ ...headers, 'X-Cakto-Signature': `${headers['X-Cakto-Signature']},v2=${'f'.repeat(64)}` })
+      .send(body);
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.results, ['grant']);
+  });
+});
+
+describe('Store', () => {
+  const code = (): VerificationCode => {
+    const now = Date.now();
+    return { hash: 'h', expiresAt: now + 60_000, issuedAt: now, windowStart: now, windowCount: 1, decoy: false };
+  };
+
+  test('counts parallel attempts one by one, and a new code starts again from one', async () => {
+    const { store } = await openTestStorage();
+    await store.setCode('k', code());
+    const counts = await Promise.all(Array.from({ length: 12 }, () => store.countAttempt('k')));
+    assert.deepEqual(
+      [...counts].sort((a, b) => a - b),
+      Array.from({ length: 12 }, (_, index) => index + 1),
+    );
+    await store.setCode('k', code());
+    assert.equal(await store.countAttempt('k'), 1);
+    await store.deleteCode('k');
+    assert.equal(await store.getCode('k'), undefined);
+  });
+
+  test('records a webhook event once', async () => {
+    const { store } = await openTestStorage();
+    assert.equal(await store.hasEvent('purchase_approved:1'), false);
+    assert.equal(await store.markEvent('purchase_approved:1'), true);
+    assert.equal(await store.markEvent('purchase_approved:1'), false);
+    assert.equal(await store.hasEvent('purchase_approved:1'), true);
+  });
+
+  test('shares rate-limit counts through Redis', { skip: !redis && 'needs TEST_UPSTASH_REDIS_REST_URL' }, async () => {
+    const limiter = new RedisRateLimitStore(redis!, `${runPrefix}rl-test:`);
+    limiter.init({ windowMs: 60_000 } as RateLimitOptions);
+    const first = await limiter.increment('203.0.113.7');
+    const second = await limiter.increment('203.0.113.7');
+    assert.equal(first.totalHits, 1);
+    assert.equal(second.totalHits, 2);
+    assert.ok(second.resetTime && second.resetTime.getTime() > Date.now());
+    assert.equal((await limiter.get('203.0.113.7'))?.totalHits, 2);
+    await limiter.decrement('203.0.113.7');
+    assert.equal((await limiter.get('203.0.113.7'))?.totalHits, 1);
+    await limiter.resetKey('203.0.113.7');
+    assert.equal(await limiter.get('203.0.113.7'), undefined);
+  });
+});
+
+describe('Environment', () => {
+  test('on Vercel: production mode, one proxy hop, origin from the production domain, Redis required', () => {
+    const base = {
+      VERCEL: '1',
+      VERCEL_PROJECT_PRODUCTION_URL: 'lp.example.app',
+      CAKTO_WEBHOOK_SECRET: SECRET,
+      ACCESS_TOKEN_SECRET: 'x'.repeat(40),
+    };
+    assert.throws(() => loadEnv(base), /UPSTASH_REDIS_REST_URL/);
+    const env = loadEnv({ ...base, UPSTASH_REDIS_REST_URL: 'https://example.upstash.io', UPSTASH_REDIS_REST_TOKEN: 'token' });
+    assert.equal(env.isProduction, true);
+    assert.equal(env.serverless, true);
+    assert.equal(env.TRUST_PROXY, 1);
+    assert.equal(env.PUBLIC_ORIGIN, 'https://lp.example.app');
+  });
 });
 
 describe('Access verification', () => {
@@ -154,6 +260,21 @@ describe('Access verification', () => {
 
     const late = await api(app).verify('maria.silva@example.com', code);
     assert.equal(late.status, 400, 'the right code no longer works after the lock');
+  });
+
+  test('a burst of parallel guesses still locks the code', async () => {
+    const { app, mailer } = await setup();
+    await deliver(app, delivery('purchase_approved'));
+    await api(app).requestCode('maria.silva@example.com');
+    const code = lastCode(mailer);
+    const wrong = code === '0000' ? '1111' : '0000';
+
+    const burst = await Promise.all(Array.from({ length: 12 }, () => api(app).verify('maria.silva@example.com', wrong)));
+    assert.ok(burst.every((res) => res.status === 400 || res.status === 429));
+    assert.ok(burst.some((res) => res.body.error?.code === 'too_many_attempts'));
+
+    const late = await api(app).verify('maria.silva@example.com', code);
+    assert.equal(late.status, 400, 'the right code no longer works after the burst');
   });
 
   test('a refund revokes the session', async () => {

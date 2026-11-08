@@ -3,6 +3,12 @@ import { defineConfig } from 'vite';
 
 const API_TARGET = process.env.API_TARGET ?? 'http://localhost:8787';
 
+// On Vercel, absolute URLs (canonical, Open Graph, JSON-LD) follow the
+// project's production domain unless VITE_SITE_URL is set explicitly.
+if (!process.env.VITE_SITE_URL && process.env.VERCEL_PROJECT_PRODUCTION_URL) {
+  process.env.VITE_SITE_URL = `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`;
+}
+
 export default defineConfig(({ isSsrBuild }) => ({
   plugins: [react()],
 

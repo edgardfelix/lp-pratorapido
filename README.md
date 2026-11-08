@@ -3,13 +3,16 @@
 Landing page de vendas do **Prato Rápido** (app de receitas e nutrição com IA) e o servidor Node.js que liga o pagamento na Cakto à liberação do acesso por e-mail.
 
 - **Front-end:** React 19, TypeScript 7 (strict), styled-components 6, React Router DOM 7, Vite 8. Páginas pré-renderizadas (SSG) e hidratadas no navegador.
-- **Servidor:** Node.js 22+, Express 5, Helmet, rate limiting, Zod, JWT (jose), Nodemailer.
+- **Servidor:** Node.js 22+, Express 5, Helmet, rate limiting, Zod, JWT (jose), Nodemailer, Upstash Redis.
+- **Hospedagem:** Vercel (CDN para as páginas, Vercel Function em `/api`) ou qualquer servidor Node.
 - **Design:** sistema Obsidian (fundo slate escuro, laranja da marca `#FE6505` extraído da logo), Geist + Geist Mono auto-hospedadas, motion segundo Emil Kowalski e as regras da Taste Skill em `.agents/`.
 
 ## Estrutura
 
 ```
 lp-pratorapido/
+├── api/index.js             Vercel Function: entrega /api/* ao servidor Express
+├── vercel.json              build, saída, região, rewrites e cabeçalhos de segurança na Vercel
 ├── assets/                  arquivos originais do cliente (logo, print do app, vídeo)
 ├── scripts/build-media.mjs  gera logo vetorial, favicons, vídeos otimizados e recortes
 ├── scripts/build-og.mjs     fotografa o hero para a imagem de compartilhamento (og.jpg)
@@ -47,6 +50,26 @@ npm start                            # serve a página e a API na porta PORT
 
 O build gera `client/dist/` com uma página HTML pronta por rota (`/`, `/privacidade`, `/termos`, `/cookies`, `/acesso`, `404.html`). Ela também pode ser publicada sozinha em uma CDN; nesse caso, configure no provedor os cabeçalhos de segurança equivalentes aos de `server/src/middleware/security.ts` e aponte `/api` para o servidor.
 
+### Deploy na Vercel
+
+O `vercel.json` já define tudo: `npm run build` na raiz, saída em `client/dist`, a Function `api/index.js` (região `gru1`, São Paulo, a mesma do Upstash) recebendo `/api/*`, URLs limpas e os mesmos cabeçalhos de segurança do servidor (CSP, HSTS, COOP/CORP, `X-Frame-Options`, Permissions-Policy). As páginas saem da CDN; só a API roda como Function.
+
+Na Vercel, o servidor assume sozinho `NODE_ENV=production`, `TRUST_PROXY=1` e `PUBLIC_ORIGIN` = domínio de produção do projeto (`VERCEL_PROJECT_PRODUCTION_URL`), e o client usa esse mesmo domínio em canonical e Open Graph. Ao ligar um domínio próprio, basta um novo deploy.
+
+Variáveis obrigatórias no projeto (Settings → Environment Variables, ambiente Production):
+
+| Variável | Valor |
+| --- | --- |
+| `NODEJS_HELPERS` | `0` (o webhook precisa dos bytes exatos que a Cakto assinou) |
+| `CAKTO_WEBHOOK_SECRET` | o segredo exibido pela Cakto ao criar o webhook |
+| `CAKTO_REQUIRE_SIGNATURE` | `true` |
+| `ACCESS_TOKEN_SECRET` | 32+ caracteres aleatórios |
+| `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` | credenciais REST do banco Upstash (sem elas a Function responde 503) |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | envio dos códigos de acesso |
+| `CAKTO_PRODUCT_IDS` | (recomendado) ids do produto que liberam acesso |
+
+Toda variável alterada só vale a partir do próximo deploy (`vercel --prod`).
+
 ### Variáveis de ambiente
 
 | Arquivo | Variável | Para quê |
@@ -57,6 +80,7 @@ O build gera `client/dist/` com uma página HTML pronta por rota (`/`, `/privaci
 | `server/.env` | `CAKTO_PRODUCT_IDS` | ids do produto que liberam acesso (recomendado) |
 | `server/.env` | `ACCESS_TOKEN_SECRET` | 32+ caracteres aleatórios para assinar os tokens |
 | `server/.env` | `SMTP_*`, `MAIL_FROM` | envio do código de acesso por e-mail |
+| `server/.env` | `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` | armazenamento no Redis (obrigatório na Vercel; sem elas, arquivo JSON local) |
 | `server/.env` | `PUBLIC_ORIGIN`, `TRUST_PROXY`, `APP_URL` | origem da página, proxies e link do app |
 
 Veja todas em `server/.env.example`.
@@ -64,9 +88,10 @@ Veja todas em `server/.env.example`.
 ### Webhook da Cakto
 
 1. No painel da Cakto, crie um webhook para `https://SEU-DOMINIO/api/webhooks/cakto` com os eventos `purchase_approved`, `refund`, `chargeback`, `subscription_created`, `subscription_renewed` e `subscription_canceled`.
-2. Copie o `secret` gerado para `CAKTO_WEBHOOK_SECRET`.
+2. A Cakto gera o `secret` ao criar o webhook: copie-o para `CAKTO_WEBHOOK_SECRET` e faça um novo deploy.
 3. Cada entrega é validada pela assinatura `X-Cakto-Signature` (HMAC-SHA256 de `{timestamp}.{corpo}`, janela de 5 minutos) e aplicada uma única vez por pedido. Reembolso, chargeback e cancelamento revogam o acesso.
-4. Opcional: configure a página de obrigado do checkout para `https://SEU-DOMINIO/acesso`.
+4. Use "Testar Webhook" no painel e confira a resposta `200`. A Cakto só reenvia sozinha em erro de rede ou timeout (8 s); uma resposta 4xx/5xx fica em "Histórico de eventos" para reenvio manual.
+5. Opcional: configure a página de obrigado do checkout para `https://SEU-DOMINIO/acesso`.
 
 ## Mídia
 
@@ -85,7 +110,8 @@ Veja todas em `server/.env.example`.
 - Link do checkout congelado, validado contra allowlist e vigiado em tempo de execução (extensões que trocam links de checkout para roubar comissão são revertidas).
 - Parâmetros de campanha (`utm_*`, `sck`, `src`) sanitizados antes de seguir para a Cakto.
 - Contatos de suporte codificados no bundle e decodificados só no navegador (anti-harvesting).
-- Código de acesso: 4 dígitos com RNG criptográfico, guardado só como HMAC, validade de 10 minutos, 5 tentativas, limite por e-mail e por IP, resposta idêntica para e-mails sem compra (sem enumeração).
+- Código de acesso: 4 dígitos com RNG criptográfico, guardado só como HMAC, validade de 10 minutos, 5 tentativas contadas de forma atômica (uma rajada de palpites em paralelo não passa do limite), limite por e-mail e por IP, resposta idêntica para e-mails sem compra (sem enumeração).
+- Na Vercel, os limites por IP são contados no Redis, valendo para todas as instâncias da Function, e cada chave fica sob o prefixo `pratorapido:lp:`.
 - Build sem source maps, minificado e com nomes reduzidos (terser), `console` removido.
 - Proteção contra clickjacking também no cliente (para hospedagens sem os cabeçalhos), mídia sem menu de contexto nem arrastar, `robots.txt` bloqueando crawlers de treinamento de IA.
 
@@ -99,9 +125,11 @@ Veja todas em `server/.env.example`.
 ## Testes e verificações
 
 ```bash
-npm test             # webhook (assinatura, replay, idempotência) e fluxo de acesso: 12 testes
+npm test             # webhook, armazenamento, ambiente da Vercel e fluxo de acesso: 18 testes
 npm run typecheck    # TypeScript 7 strict no client e no servidor
 ```
+
+Com `TEST_UPSTASH_REDIS_REST_URL` e `TEST_UPSTASH_REDIS_REST_TOKEN` definidas, a mesma suíte roda no Redis, sob um prefixo temporário apagado ao final.
 
 A página também passou pelas ferramentas da Taste Skill em `.agents/skills/design-taste-frontend`:
 
