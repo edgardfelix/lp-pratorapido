@@ -8,7 +8,7 @@ export interface PageMeta {
 
 export const pageMeta = {
   home: {
-    title: 'Prato Rápido: receitas com IA a partir do que você tem em casa',
+    title: 'Prato Rápido | Receitas fáceis com o que você tem',
     description:
       'Transforme os ingredientes da sua geladeira em pratos de chef em segundos. Receitas sob medida, acompanhamentos e jornadas de nutrição criados por inteligência artificial.',
     path: '/',
